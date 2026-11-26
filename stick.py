@@ -2197,6 +2197,14 @@ def _build_mypacks_page(uid: int, packs: list, page: int = 0):
     ])
     return text, kb
 
+def _kb_to_bot_api_dict(kb: InlineKeyboardMarkup) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": btn.text, "callback_data": btn.callback_data} for btn in row]
+            for row in kb.inline_keyboard
+        ]
+    }
+
 @app.on_message(filters.command("mypacks") & (filters.private | filters.group))
 async def mypacks_cmd(client: Client, message: Message):
     if not await fsub.check(client, message):
@@ -2209,12 +2217,14 @@ async def mypacks_cmd(client: Client, message: Message):
         return
 
     text, kb = _build_mypacks_page(uid, packs, page=0)
-    await message.reply_text(
-        text,
-        reply_markup=kb,
-        parse_mode=HTML_PARSE_MODE,
-        disable_web_page_preview=True,
-    )
+    await _bot_api_json("sendMessage", {
+        "chat_id": message.chat.id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_to_message_id": message.id,
+        "reply_markup": _kb_to_bot_api_dict(kb),
+    })
 
 @app.on_callback_query(filters.regex(r"^mypacks_page\|(\d+)\|(\d+)$"))
 async def mypacks_page_cb(client: Client, callback: CallbackQuery):
@@ -2232,12 +2242,14 @@ async def mypacks_page_cb(client: Client, callback: CallbackQuery):
     text, kb = _build_mypacks_page(owner_uid, packs, page=page)
     await callback.answer()
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=kb,
-            parse_mode=HTML_PARSE_MODE,
-            disable_web_page_preview=True,
-        )
+        await _bot_api_json("editMessageText", {
+            "chat_id": callback.message.chat.id,
+            "message_id": callback.message.id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": _kb_to_bot_api_dict(kb),
+        })
     except Exception:
         pass
 
