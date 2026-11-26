@@ -20,16 +20,25 @@ import uuid
 from datetime import datetime
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from pyrogram import Client, filters, StopPropagation
+from pyrogram.enums import ParseMode
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from handlers.logger import send_log
 
 MAX_EMOJI_PER_PACK = 200
 MAX_INPUT_BYTES = 20 * 1024 * 1024   # 20 MB input safety cap
+MAX_STATIC_PNG_BYTES = 512 * 1024    # 512 KB Telegram PNG limit
 MAX_TGS_BYTES = 64 * 1024            # 64 KB Telegram TGS limit
 MAX_WEBM_BYTES = 256 * 1024          # 256 KB Telegram WEBM limit
 PREMIUM_SESSION_TIMEOUT = 1800       # 30 minutes
+_OUTLINE_CYCLE = ("none", "white", "black")
+
+try:
+    import rembg as _optional_rembg  # noqa: F401
+    HAS_REMBG = True
+except ImportError:
+    HAS_REMBG = False
 
 
 def _normalize_emoji_png(image_bytes: bytes) -> bytes:
@@ -49,6 +58,103 @@ def _normalize_emoji_png(image_bytes: bytes) -> bytes:
 
     out = BytesIO()
     canvas.save(out, format="PNG")
+    out.seek(0)
+    return out.getvalue()
+
+
+def _to_status_png(image_bytes: bytes, outline: str = "none") -> tuple[bytes, bool]:
+    """
+    Optimize an image for Telegram Premium Emoji Status (~20-24px readability):
+    crop to subject bbox, thumbnail to 82px, pad 3px, optional MaxFilter(5) outline,
+    enhance RGB contrast/sharpness (preserving alpha), and center on 100x100 RGBA PNG.
+    Returns (png_bytes, has_opaque_bg).
+    """
+    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
+    alpha_extrema = img.getchannel("A").getextrema()
+    has_opaque_bg = bool(alpha_extrema and alpha_extrema[0] == 255)
+
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    img.thumbnail((82, 82), Image.Resampling.LANCZOS)
+
+    # 3px transparent padding before outline so MaxFilter(5) never clips
+    padded = Image.new("RGBA", (img.width + 6, img.height + 6), (0, 0, 0, 0))
+    padded.paste(img, (3, 3), img)
+
+    if outline in ("white", "black"):
+        alpha = padded.getchannel("A")
+        grown = alpha.filter(ImageFilter.MaxFilter(5))
+        color = (255, 255, 255, 255) if outline == "white" else (0, 0, 0, 255)
+        outline_layer = Image.new("RGBA", padded.size, color)
+        outline_layer.putalpha(grown)
+        padded = Image.alpha_composite(outline_layer, padded)
+
+    # Enhance contrast & sharpness on RGB channels only, preserving alpha
+    r, g, b, a = padded.split()
+    rgb = Image.merge("RGB", (r, g, b))
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.1)
+    rgb = ImageEnhance.Sharpness(rgb).enhance(1.2)
+    r2, g2, b2 = rgb.split()
+    enhanced = Image.merge("RGBA", (r2, g2, b2, a))
+
+    canvas = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    offset_x = (100 - enhanced.width) // 2
+    offset_y = (100 - enhanced.height) // 2
+    canvas.paste(enhanced, (offset_x, offset_y), enhanced)
+
+    out = BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    png_bytes = out.getvalue()
+    if len(png_bytes) > MAX_STATIC_PNG_BYTES:
+        raise ValueError("Processed PNG exceeds 512 KB limit.")
+    return png_bytes, has_opaque_bg
+
+
+def _build_status_preview_strip(status_png: bytes, user_name: str = "User") -> bytes:
+    """Render 24, 32, 48, 100px previews + 'name + emoji' mock on Light (#FFFFFF) & Dark (#1C1C1E)."""
+    emoji_img = Image.open(BytesIO(status_png)).convert("RGBA")
+    w, h = 760, 280
+    strip = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    d = ImageDraw.Draw(strip)
+
+    # Bottom half: Dark (#1C1C1E)
+    d.rectangle((0, h // 2, w, h), fill=(28, 28, 30, 255))
+    d.line((0, h // 2, w, h // 2), fill=(128, 128, 128, 120), width=1)
+
+    font = ImageFont.load_default()
+    for fpath in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+    ):
+        try:
+            font = ImageFont.truetype(fpath, 18)
+            break
+        except OSError:
+            continue
+
+    sizes = (24, 32, 48, 100)
+    x_positions = (35, 110, 195, 300)
+    clean_name = (user_name or "User").strip()[:12] or "User"
+
+    for row_idx, (bg_top, text_col) in enumerate(((0, (30, 30, 30, 255)), (h // 2, (240, 240, 245, 255)))):
+        for sz, xp in zip(sizes, x_positions):
+            resized = emoji_img.resize((sz, sz), Image.Resampling.LANCZOS)
+            cy = bg_top + (h // 2 - sz) // 2 - 8
+            strip.paste(resized, (xp, cy), resized)
+            d.text((xp, bg_top + h // 2 - 26), f"{sz}px", font=font, fill=text_col)
+
+        # Mock "Name + 24px Status Emoji" on the right side
+        mock_x = 455
+        mock_y = bg_top + (h // 2 - 24) // 2
+        d.text((mock_x, mock_y + 2), clean_name, font=font, fill=text_col)
+        bb = d.textbbox((mock_x, mock_y + 2), clean_name, font=font)
+        em24 = emoji_img.resize((24, 24), Image.Resampling.LANCZOS)
+        strip.paste(em24, (bb[2] + 8, mock_y), em24)
+
+    out = BytesIO()
+    strip.save(out, format="PNG")
     out.seek(0)
     return out.getvalue()
 
@@ -202,6 +308,8 @@ def register(app, fsub):
                             "pack_name": pack_name,
                             "title": title[:64],
                             "pack_type": fmt,
+                            "status_mode": bool(sess.get("status_mode", False)),
+                            "outline": sess.get("outline", "none"),
                             "count": 1,
                             "created_at": datetime.utcnow(),
                         }},
@@ -264,11 +372,11 @@ def register(app, fsub):
                 file_name,
                 content_type=content_type,
             )
-            new_count = current_count + 1
             premium_packs.update_one(
                 {"user_id": str(uid), "pack_name": pack_name},
-                {"$set": {"count": new_count}},
+                {"$inc": {"count": 1}},
             )
+            new_count = current_count + 1
             premium_sessions.update_one(
                 {"user_id": str(uid)},
                 {"$set": {
@@ -461,6 +569,8 @@ def register(app, fsub):
             return
 
         ptype = pack.get("pack_type", "static")
+        st_mode = bool(pack.get("status_mode", False))
+        st_outline = pack.get("outline", "none")
         premium_sessions.update_one(
             {"user_id": str(uid)},
             {"$set": {
@@ -469,17 +579,22 @@ def register(app, fsub):
                 "is_new": False,
                 "pack_name": pname,
                 "pack_type": ptype,
+                "status_mode": st_mode,
+                "outline": st_outline,
                 "title": pack.get("title", pname),
                 "count": pack.get("count", 0),
                 "pending_b64": None,
+                "pending_status_b64": None,
+                "pending_orig_b64": None,
                 "pending_fmt": None,
                 "started_at": time.time(),
             }},
             upsert=True,
         )
         await callback.answer()
+        mode_note = f"\n🎯 **Status Mode:** ON (`{st_outline}`)" if st_mode else ""
         await callback.message.edit_text(
-            f"➕ **{pack.get('title', pname)}** (`{ptype}`) me emoji add karne ke liye media bhejein.\n"
+            f"➕ **{pack.get('title', pname)}** (`{ptype}`) me emoji add karne ke liye media bhejein.{mode_note}\n"
             f"Finish karne ke liye `/done` bhejein."
         )
 
@@ -518,6 +633,129 @@ def register(app, fsub):
         await callback.answer("🗑 Pack delete ho gaya!", show_alert=True)
         await callback.message.edit_text(f"🗑 Pack `{pname}` delete kar diya gaya.")
 
+    def _build_status_config_ui(title: str, status_mode: bool, outline: str):
+        st_label = "ON ✅" if status_mode else "OFF ❌"
+        out_label = outline.capitalize()
+        text = (
+            f"🎯 <b>Status Mode Setup</b> — <i>{html.escape(title)}</i>\n\n"
+            "<b>Hinglish:</b> Telegram Emoji Status chhota (~20-24px) dikhta hai. "
+            "Status Mode ON karne par bot subject ko crop karke zoom, contrast/sharpness "
+            "boost aur optional outline lagata hai taaki chhote size me bhi saaf dikhe.\n\n"
+            "<b>English:</b> Telegram Emoji Status appears small (~20-24px). "
+            "Enabling Status Mode crops &amp; zooms the subject, boosts contrast/sharpness, "
+            "and adds an optional outline for crisp readability.\n\n"
+            f"• <b>Status Mode:</b> <code>{st_label}</code>\n"
+            f"• <b>Outline:</b> <code>{out_label}</code>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🎯 Status Mode: {'ON' if status_mode else 'OFF'}", callback_data="prem_st_toggle")],
+            [InlineKeyboardButton(f"🖍 Outline: {out_label}", callback_data="prem_st_outline")],
+            [InlineKeyboardButton("▶️ Continue", callback_data="prem_st_continue")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="prem_cancel")],
+        ])
+        return text, kb
+
+    @app.on_callback_query(filters.regex(r"^prem_st_toggle$"))
+    async def prem_st_toggle_cb(client: Client, callback: CallbackQuery):
+        uid = callback.from_user.id
+        sess = _get_session(uid)
+        if not sess or sess.get("step") != "waiting_status_config":
+            await callback.answer("Session expire ho gaya hai.", show_alert=True)
+            return
+        new_mode = not bool(sess.get("status_mode", False))
+        outline = sess.get("outline", "none")
+        premium_sessions.update_one(
+            {"user_id": str(uid)},
+            {"$set": {"status_mode": new_mode, "started_at": time.time()}},
+        )
+        text, kb = _build_status_config_ui(sess.get("title", "Pack"), new_mode, outline)
+        await callback.answer(f"Status Mode: {'ON' if new_mode else 'OFF'}")
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+    @app.on_callback_query(filters.regex(r"^prem_st_outline$"))
+    async def prem_st_outline_cb(client: Client, callback: CallbackQuery):
+        uid = callback.from_user.id
+        sess = _get_session(uid)
+        if not sess or sess.get("step") != "waiting_status_config":
+            await callback.answer("Session expire ho gaya hai.", show_alert=True)
+            return
+        if not sess.get("status_mode", False):
+            await callback.answer("Pehle Status Mode ON karein!", show_alert=True)
+            return
+        cur = sess.get("outline", "none")
+        idx = _OUTLINE_CYCLE.index(cur) if cur in _OUTLINE_CYCLE else 0
+        nxt = _OUTLINE_CYCLE[(idx + 1) % len(_OUTLINE_CYCLE)]
+        premium_sessions.update_one(
+            {"user_id": str(uid)},
+            {"$set": {"outline": nxt, "started_at": time.time()}},
+        )
+        text, kb = _build_status_config_ui(sess.get("title", "Pack"), True, nxt)
+        await callback.answer(f"Outline: {nxt.capitalize()}")
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+    @app.on_callback_query(filters.regex(r"^prem_st_continue$"))
+    async def prem_st_continue_cb(client: Client, callback: CallbackQuery):
+        uid = callback.from_user.id
+        sess = _get_session(uid)
+        if not sess or sess.get("step") != "waiting_status_config":
+            await callback.answer("Session expire ho gaya hai.", show_alert=True)
+            return
+        premium_sessions.update_one(
+            {"user_id": str(uid)},
+            {"$set": {"step": "waiting_media", "started_at": time.time()}},
+        )
+        await callback.answer()
+        st_mode = bool(sess.get("status_mode", False))
+        if st_mode:
+            await callback.message.edit_text(
+                f"✅ Title: **{sess.get('title')}** | 🎯 Status Mode: **ON** (`{sess.get('outline', 'none')}`)\n\n"
+                f"📸 Ab static **Photo / PNG / WebP Sticker** bhejein (transparent PNG best rahega).\n"
+                f"Finish karne ke liye `/done` bhejein."
+            )
+        else:
+            await callback.message.edit_text(
+                f"✅ Title set: **{sess.get('title')}**\n\n"
+                f"📸 Ab koi bhi **Photo, Sticker (.webp/.tgs/.webm), GIF, ya Video** bhejein — bot format khud auto-set kar dega!\n"
+                f"Finish karne ke liye `/done` bhejein."
+            )
+
+    @app.on_callback_query(filters.regex(r"^prem_st_(use|keep)$"))
+    async def prem_st_confirm_cb(client: Client, callback: CallbackQuery):
+        uid = callback.from_user.id
+        sess = _get_session(uid)
+        if not sess or sess.get("step") != "waiting_confirm":
+            await callback.answer("Session expire ho gaya hai.", show_alert=True)
+            return
+        choice = callback.matches[0].group(1)
+        chosen_b64 = sess.get("pending_status_b64") if choice == "use" else sess.get("pending_orig_b64")
+        if not chosen_b64:
+            await callback.answer("Preview data nahi mila, image dobara bhejein.", show_alert=True)
+            return
+
+        suggested = sess.get("suggested_emoji") or "😀"
+        premium_sessions.update_one(
+            {"user_id": str(uid)},
+            {"$set": {
+                "step": "waiting_emoji",
+                "pending_b64": chosen_b64,
+                "pending_fmt": "static",
+                "pending_status_b64": None,
+                "pending_orig_b64": None,
+                "started_at": time.time(),
+            }},
+        )
+        await callback.answer("Selected!")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{suggested} Default ({suggested}) Use Karein", callback_data="prem_defemoji")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="prem_cancel")],
+        ])
+        label = "✅ Status-Optimized" if choice == "use" else "🔄 Original 100x100"
+        await callback.message.reply_text(
+            f"{label} image select ho gayi!\n\n"
+            f"😊 Ab is custom emoji ke liye **koi ek emoji** bhejein (jaise `🔥` ya `❤️`), ya niche button dabayein:",
+            reply_markup=kb,
+        )
+
     # ==============================================
     # GROUP=2 HANDLERS (Only active `premium_sessions`)
     # ==============================================
@@ -551,17 +789,14 @@ def register(app, fsub):
                 {"$set": {
                     "title": title,
                     "pack_name": pack_name,
-                    "step": "waiting_media",
+                    "status_mode": False,
+                    "outline": "none",
+                    "step": "waiting_status_config",
                     "started_at": time.time(),
                 }},
             )
-            await reply_or_dm(
-                client,
-                message,
-                f"✅ Title set: **{title}**\n\n"
-                f"📸 Ab koi bhi **Photo, Sticker (.webp/.tgs/.webm), GIF, ya Video** bhejein — bot format khud auto-set kar dega!\n"
-                f"Finish karne ke liye `/done` bhejein.",
-            )
+            text, kb = _build_status_config_ui(title, False, "none")
+            await reply_or_dm(client, message, text, reply_markup=kb, parse_mode=ParseMode.HTML)
             raise StopPropagation
 
         if step == "waiting_emoji" and sess.get("pending_b64"):
@@ -592,8 +827,10 @@ def register(app, fsub):
             return
         uid = message.from_user.id
         sess = _get_session(uid)
-        if not sess or sess.get("step") not in ("waiting_media", "waiting_emoji"):
+        if not sess or sess.get("step") not in ("waiting_media", "waiting_emoji", "waiting_confirm"):
             return  # Normal bot flow continue hoga
+
+        prev_step = sess.get("step")
 
         # Detect incoming format: static | animated | video
         incoming_fmt = None
@@ -639,6 +876,74 @@ def register(app, fsub):
 
         if file_size and file_size > MAX_INPUT_BYTES:
             await reply_or_dm(client, message, "❌ File bahut badi hai (max 20 MB).")
+            raise StopPropagation
+
+        # Status Mode ON: static-only optimization + light/dark preview strip + waiting_confirm
+        if sess.get("status_mode", False):
+            if incoming_fmt != "static":
+                await reply_or_dm(
+                    client,
+                    message,
+                    "⚠️ **Status Mode** me abhi sirf **static images/stickers** (PNG, JPG, WebP) supported hain.",
+                )
+                raise StopPropagation
+
+            discard_note = "🔄 Purani preview discard karke nayi image process ki ja rahi hai...\n" if prev_step == "waiting_confirm" else ""
+            proc = await reply_or_dm(client, message, f"{discard_note}🎯 Status Mode me optimize kiya ja raha hai...")
+            try:
+                bio = await client.download_media(file_id, in_memory=True)
+                raw_bytes = bio.getvalue()
+                if len(raw_bytes) > MAX_INPUT_BYTES:
+                    await proc.edit_text("❌ File bahut badi hai (max 20 MB).")
+                    raise StopPropagation
+                outline = sess.get("outline", "none")
+                status_png, has_bg = await asyncio.to_thread(_to_status_png, raw_bytes, outline)
+                orig_png = await asyncio.to_thread(_normalize_emoji_png, raw_bytes)
+                uname = (message.from_user.first_name or "User")
+                strip_png = await asyncio.to_thread(_build_status_preview_strip, status_png, uname)
+            except StopPropagation:
+                raise
+            except Exception as e:
+                print(f"[premium.py] status mode process error for {uid}: {e}")
+                await proc.edit_text("❌ Corrupt ya unsupported image file. Doosri image bhejein.")
+                raise StopPropagation
+
+            suggested = (message.sticker.emoji if (message.sticker and message.sticker.emoji) else "😀")
+            premium_sessions.update_one(
+                {"user_id": str(uid)},
+                {"$set": {
+                    "step": "waiting_confirm",
+                    "pending_status_b64": base64.b64encode(status_png).decode("ascii"),
+                    "pending_orig_b64": base64.b64encode(orig_png).decode("ascii"),
+                    "suggested_emoji": suggested,
+                    "started_at": time.time(),
+                }},
+            )
+            bg_warn = (
+                "\n\n⚠️ <b>Warning:</b> Background hata ke PNG bhejo, warna result sirf resize jaisa lagega."
+                if has_bg
+                else ""
+            )
+            cap = (
+                f"🎯 <b>Status Mode Preview</b> (Outline: <code>{outline}</code>)\n\n"
+                "<b>Hinglish:</b> Upar Light aur Dark background par 24–100px preview dekhein aur chunein.\n"
+                "<b>English:</b> Check the 24–100px preview on Light &amp; Dark backgrounds above and choose:"
+                f"{bg_warn}"
+            )
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Use This / Ye Rakho", callback_data="prem_st_use"),
+                    InlineKeyboardButton("🔄 Original Rakho / Keep Original", callback_data="prem_st_keep"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="prem_cancel")],
+            ])
+            try:
+                await proc.delete()
+            except Exception:
+                pass
+            strip_bio = BytesIO(strip_png)
+            strip_bio.name = "status_preview.png"
+            await message.reply_photo(photo=strip_bio, caption=cap, reply_markup=kb, parse_mode=ParseMode.HTML)
             raise StopPropagation
 
         proc = await reply_or_dm(client, message, f"⚙️ `{incoming_fmt}` emoji auto-convert ho raha hai...")
