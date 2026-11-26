@@ -1,0 +1,59 @@
+{
+  "name": "StickerBot",
+  "description": "Telegram Sticker & Custom Emoji Maker Bot with Force-Subscribe, Quote Stickers, Kang, ClonePack, Sudo & Logger.",
+  "keywords": ["telegram", "pyrogram", "sticker-bot", "custom-emoji", "mongodb"],
+  "stack": "heroku-22",
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-apt"
+    },
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "env": {
+    "API_ID": {
+      "description": "Telegram API ID from https://my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API Hash from https://my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "MONGODB_URI": {
+      "description": "MongoDB Connection URI (e.g. MongoDB Atlas)",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Numeric Telegram User ID of the Bot Owner",
+      "required": true
+    },
+    "ADMIN_USER_ID": {
+      "description": "Numeric Telegram User ID(s) of Admin(s), comma-separated",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "MongoDB database name",
+      "value": "sticker_bot",
+      "required": false
+    },
+    "FORCE_SUB_CHANNELS": {
+      "description": "Optional comma-separated channel usernames or IDs for force-subscribe",
+      "required": false
+    },
+    "LOGGER_GROUP_ID": {
+      "description": "Optional numeric chat ID of Logger Group (e.g. -1001234567890)",
+      "required": false
+    }
+  }
+}

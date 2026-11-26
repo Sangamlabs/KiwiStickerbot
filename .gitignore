@@ -1,0 +1,23 @@
+# Environment & Secret files
+.env
+*.env
+!.env.example
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+handlers/__pycache__/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Temp folders
+temp_stickers/
+bin/
