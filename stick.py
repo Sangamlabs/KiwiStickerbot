@@ -1350,18 +1350,27 @@ async def start_cmd(client: Client, message: Message):
 
     if start_photo:
         try:
-            await message.reply_photo(
-                photo=start_photo,
-                caption=caption,
-                reply_markup=kb,
-                has_spoiler=True,
-                parse_mode=HTML_PARSE_MODE,
-            )
+            await _bot_api_json("sendPhoto", {
+                "chat_id": message.chat.id,
+                "photo": start_photo,
+                "caption": caption,
+                "parse_mode": "HTML",
+                "has_spoiler": True,
+                "reply_to_message_id": message.id,
+                "reply_markup": _kb_to_bot_api_dict(kb),
+            })
             return
         except Exception as e:
             print(f"[START] Failed to send START_PHOTO ({start_photo}): {e}")
 
-    await message.reply_text(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
+    await _bot_api_json("sendMessage", {
+        "chat_id": message.chat.id,
+        "text": caption,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_to_message_id": message.id,
+        "reply_markup": _kb_to_bot_api_dict(kb),
+    })
 
 @app.on_callback_query(filters.regex(r"^start_help_menu$"))
 async def start_help_menu_cb(client: Client, callback: CallbackQuery):
@@ -1389,9 +1398,22 @@ async def start_back_home_cb(client: Client, callback: CallbackQuery):
     await callback.answer()
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
+            await _bot_api_json("editMessageCaption", {
+                "chat_id": callback.message.chat.id,
+                "message_id": callback.message.id,
+                "caption": caption,
+                "parse_mode": "HTML",
+                "reply_markup": _kb_to_bot_api_dict(kb),
+            })
         else:
-            await callback.message.edit_text(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
+            await _bot_api_json("editMessageText", {
+                "chat_id": callback.message.chat.id,
+                "message_id": callback.message.id,
+                "text": caption,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": _kb_to_bot_api_dict(kb),
+            })
     except Exception:
         pass
 register_user_command("start", "Start the bot and see the welcome message.", category=CATEGORY_GENERAL)
@@ -2198,12 +2220,18 @@ def _build_mypacks_page(uid: int, packs: list, page: int = 0):
     return text, kb
 
 def _kb_to_bot_api_dict(kb: InlineKeyboardMarkup) -> dict:
-    return {
-        "inline_keyboard": [
-            [{"text": btn.text, "callback_data": btn.callback_data} for btn in row]
-            for row in kb.inline_keyboard
-        ]
-    }
+    rows = []
+    for row in kb.inline_keyboard:
+        r = []
+        for btn in row:
+            item = {"text": btn.text}
+            if getattr(btn, "url", None):
+                item["url"] = btn.url
+            elif getattr(btn, "callback_data", None):
+                item["callback_data"] = btn.callback_data
+            r.append(item)
+        rows.append(r)
+    return {"inline_keyboard": rows}
 
 @app.on_message(filters.command("mypacks") & (filters.private | filters.group))
 async def mypacks_cmd(client: Client, message: Message):
