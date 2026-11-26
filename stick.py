@@ -725,10 +725,10 @@ async def set_sticker_set_title(pack_name, title):
         raise Exception(result.get("description", "Unknown Telegram Bot API error"))
     return True
 
-async def _bot_api_json(method, payload, session=None):
+async def _bot_api_json(method, payload, session=None, _retries=0):
     """Send a Bot API POST request, optionally reusing a keep-alive ClientSession."""
     url = f"{TELEGRAM_BOT_API_BASE}/{method}"
-    req_timeout = aiohttp.ClientTimeout(total=30)
+    req_timeout = aiohttp.ClientTimeout(total=25)
     if session is not None:
         async with session.post(url, json=payload, timeout=req_timeout) as resp:
             result = await resp.json()
@@ -739,9 +739,9 @@ async def _bot_api_json(method, payload, session=None):
     if not result.get("ok"):
         desc = result.get("description", "Unknown Telegram Bot API error")
         retry_after = result.get("parameters", {}).get("retry_after")
-        if retry_after:
+        if retry_after and _retries < 2 and float(retry_after) <= 15:
             await asyncio.sleep(float(retry_after) + 0.5)
-            return await _bot_api_json(method, payload, session=session)
+            return await _bot_api_json(method, payload, session=session, _retries=_retries + 1)
         raise Exception(desc)
     return result.get("result")
 
@@ -1644,68 +1644,80 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
     failed = 0
     telegram_pack_name = None
 
-    async with aiohttp.ClientSession() as http_session:
-        # Step 1: Try batch-50, then batch-20 (lighter for video packs), then first working sticker
-        batch_size = 20 if pack_type == "video" else 50
-        first_batch = input_stickers[:batch_size]
-        success, result, telegram_pack_name = await create_unique_sticker_pack_from_input(
-            uid, display_title, first_batch, session=http_session, sticker_type=src_sticker_type
-        )
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            # Step 1: Try batch-10 for video (fast & safe), batch-50 for static, then probe first 3 stickers
+            batch_size = 10 if pack_type == "video" else 50
+            first_batch = input_stickers[:batch_size]
+            success, result, telegram_pack_name = await create_unique_sticker_pack_from_input(
+                uid, display_title, first_batch, session=http_session, sticker_type=src_sticker_type
+            )
 
-        if success:
-            copied = len(first_batch)
-            start_idx = len(first_batch)
-        else:
-            print(f"[CLONEPACK] Batch-{batch_size} failed ({result}), trying first working sticker...")
-            created_single = False
-            last_err = result
-            first_ok_idx = 0
-            for probe_idx, probe_item in enumerate(input_stickers[:10]):
-                ok_s, res_s, cand_name = await create_unique_sticker_pack_from_input(
-                    uid, display_title, [probe_item], session=http_session, sticker_type=src_sticker_type
-                )
-                if ok_s:
-                    created_single = True
-                    telegram_pack_name = cand_name
-                    first_ok_idx = probe_idx
-                    copied = 1
-                    failed += probe_idx
-                    break
-                last_err = res_s
+            if success:
+                copied = len(first_batch)
+                start_idx = len(first_batch)
+            else:
+                print(f"[CLONEPACK] Batch-{batch_size} failed ({result}), trying single sticker...")
+                try:
+                    await progress.edit_text(small_caps(f"⚙️ Batch skipped, creating pack 1-by-1...\n\n0 / {total} copied..."))
+                except Exception:
+                    pass
+                created_single = False
+                last_err = result or "Timeout"
+                first_ok_idx = 0
+                for probe_idx, probe_item in enumerate(input_stickers[:3]):
+                    ok_s, res_s, cand_name = await create_unique_sticker_pack_from_input(
+                        uid, display_title, [probe_item], session=http_session, sticker_type=src_sticker_type
+                    )
+                    if ok_s:
+                        created_single = True
+                        telegram_pack_name = cand_name
+                        first_ok_idx = probe_idx
+                        copied = 1
+                        failed += probe_idx
+                        break
+                    last_err = res_s or "Timeout"
 
-            if not created_single:
-                await progress.edit_text(small_caps(f"❌ Unable to create the cloned sticker pack: {last_err}"))
-                return
-            start_idx = first_ok_idx + 1
+                if not created_single:
+                    await progress.edit_text(small_caps(f"❌ Unable to create the cloned sticker pack: {last_err}"))
+                    return
+                start_idx = first_ok_idx + 1
 
-        create_pack_record(uid, pack_index, display_title, telegram_pack_name, first_emoji, pack_type=pack_type)
+            create_pack_record(uid, pack_index, display_title, telegram_pack_name, first_emoji, pack_type=pack_type)
 
-        if start_idx < total:
-            try:
-                await progress.edit_text(small_caps(f"⚡ Fast-Cloning Sticker Pack...\n\n{copied} / {total} copied..."))
-            except Exception:
-                pass
-
-            # 3 concurrent requests avoids Telegram 429 flood waits on video packs
-            sem = asyncio.Semaphore(3)
-
-            async def _add_one(item):
-                async with sem:
-                    return await add_sticker_input_to_pack(uid, telegram_pack_name, item, session=http_session)
-
-            remaining = input_stickers[start_idx:]
-            for chunk_start in range(0, len(remaining), 15):
-                chunk = remaining[chunk_start:chunk_start + 15]
-                results = await asyncio.gather(*[_add_one(it) for it in chunk], return_exceptions=True)
-                for res in results:
-                    if isinstance(res, tuple) and res[0]:
-                        copied += 1
-                    else:
-                        failed += 1
+            if start_idx < total:
                 try:
                     await progress.edit_text(small_caps(f"⚡ Fast-Cloning Sticker Pack...\n\n{copied} / {total} copied..."))
                 except Exception:
                     pass
+
+                # 3 concurrent requests avoids Telegram 429 flood waits on video packs
+                sem = asyncio.Semaphore(3)
+
+                async def _add_one(item):
+                    async with sem:
+                        return await add_sticker_input_to_pack(uid, telegram_pack_name, item, session=http_session)
+
+                remaining = input_stickers[start_idx:]
+                for chunk_start in range(0, len(remaining), 15):
+                    chunk = remaining[chunk_start:chunk_start + 15]
+                    results = await asyncio.gather(*[_add_one(it) for it in chunk], return_exceptions=True)
+                    for res in results:
+                        if isinstance(res, tuple) and res[0]:
+                            copied += 1
+                        else:
+                            failed += 1
+                    try:
+                        await progress.edit_text(small_caps(f"⚡ Fast-Cloning Sticker Pack...\n\n{copied} / {total} copied..."))
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[CLONEPACK] Unexpected error: {type(e).__name__}: {e}")
+        try:
+            await progress.edit_text(small_caps(f"❌ Cloning error: {str(e) or type(e).__name__}"))
+        except Exception:
+            pass
+        return
 
     packs_collection.update_one(
         {"user_id": str(uid), "pack_index": pack_index},
