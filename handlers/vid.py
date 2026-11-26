@@ -4,13 +4,14 @@ def register(app, fsub):
         small_caps, reply_or_dm, vid_sessions, TEMP_DIR, DEFAULT_EMOJI,
         get_user_packs, get_pack_by_index, get_user_pack,
         get_next_pack_index, create_pack_record, create_unique_video_sticker_pack,
-        add_video_sticker_to_pack, increment_pack_sticker_count,
+        add_video_sticker_to_pack, create_unique_sticker_pack, add_sticker_to_pack,
+        normalize_sticker_png, add_text_to_image, increment_pack_sticker_count,
         increment_sticker_count, generate_vid_preview, upload_to_catbox,
         normalize_video_sticker, cleanup_temp_files, probe_video_duration,
         cancel_user_session, MAX_PREVIEW_SECONDS, DURATION_TOLERANCE,
         register_user_command, CATEGORY_STICKER, packs_collection
     )
-    import os, uuid, time
+    import asyncio, os, uuid, time
     from io import BytesIO
     from pyrogram import Client, filters, StopPropagation
     from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -64,27 +65,22 @@ def register(app, fsub):
             return
 
         pack = get_pack_by_index(uid, pack_index)
-        if pack and pack.get("pack_type", "static") == "static":
-            await reply_or_dm(client, message, small_caps("❌ This is a static sticker pack. Video stickers cannot be added. Use /vid to create a video pack."))
-            return
 
-        if message.photo:
-            await reply_or_dm(client, message, small_caps("❌ Photos are not supported in /vid. Please send an MP4 video or WEBM Video Sticker."))
-            return
-
+        is_static_input = False
         is_webm_input = False
         file_name = ""
         mime = ""
 
-        if message.sticker:
+        if message.photo:
+            is_static_input = True
+        elif message.sticker:
             if message.sticker.is_animated:
-                await reply_or_dm(client, message, small_caps("❌ Animated .TGS stickers are not supported. Send an MP4 video or WEBM Video Sticker."))
+                await reply_or_dm(client, message, small_caps("❌ Animated .TGS stickers are not supported. Send an MP4, WEBM, Photo, or Static Sticker."))
                 return
             if message.sticker.is_video:
                 is_webm_input = True
             else:
-                await reply_or_dm(client, message, small_caps("❌ Static stickers are not supported in /vid. Send an MP4 video or WEBM Video Sticker."))
-                return
+                is_static_input = True
         elif message.video:
             file_name = (message.video.file_name or "").lower()
             mime = (message.video.mime_type or "").lower()
@@ -93,14 +89,16 @@ def register(app, fsub):
         elif message.document:
             mime = (message.document.mime_type or "").lower()
             file_name = (message.document.file_name or "").lower()
-            if mime.startswith("video/") or file_name.endswith(".mp4") or file_name.endswith(".webm"):
+            if mime.startswith("image/") or file_name.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                is_static_input = True
+            elif mime.startswith("video/") or file_name.endswith(".mp4") or file_name.endswith(".webm"):
                 if "webm" in mime or file_name.endswith(".webm"):
                     is_webm_input = True
             else:
-                await reply_or_dm(client, message, small_caps("❌ Invalid file. Please upload an MP4 video or WEBM Video Sticker only."))
+                await reply_or_dm(client, message, small_caps("❌ Invalid file. Please upload a Video (MP4/WEBM), Photo, or Static Sticker."))
                 return
         else:
-            await reply_or_dm(client, message, small_caps("❌ Invalid file. Please upload an MP4 video or WEBM Video Sticker only."))
+            await reply_or_dm(client, message, small_caps("❌ Invalid file. Please upload a Video (MP4/WEBM), Photo, or Static Sticker."))
             return
 
         old_preview = session.pop("preview_message", None)
@@ -112,6 +110,36 @@ def register(app, fsub):
 
         proc = await reply_or_dm(client, message, small_caps("⚙️ Downloading..."))
 
+        if is_static_input:
+            temp_raw = os.path.join(TEMP_DIR, f"vid_static_{uid}_{uuid.uuid4().hex}.png")
+            try:
+                bio = await client.download_media(message, in_memory=True)
+                png_bytes = await asyncio.to_thread(normalize_sticker_png, bio.getvalue())
+                with open(temp_raw, "wb") as f:
+                    f.write(png_bytes)
+                cleanup_temp_files(session.get("video_path"), session.get("webm_path"))
+                session["video_path"] = temp_raw
+                session["webm_path"] = temp_raw
+                session["is_static"] = True
+
+                if "text_option_done" in session:
+                    session["step"] = "vid_preview"
+                    await proc.delete()
+                    await send_vid_preview(client, message.chat.id, message.from_user, uid, is_group=message.chat.type != "private")
+                else:
+                    session["step"] = "vid_waiting_text_option"
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✏ Add Text", callback_data="vidtext_add"),
+                         InlineKeyboardButton("⏭ Skip", callback_data="vidtext_skip")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="vidflow_cancel")]
+                    ])
+                    await proc.edit_text(small_caps("Do you want to add text?"), reply_markup=kb)
+            except Exception as e:
+                cleanup_temp_files(temp_raw)
+                await proc.edit_text(small_caps(f"❌ Failed to process static sticker/image: {e}"))
+            return
+
+        session["is_static"] = False
         ext = ".webm" if is_webm_input else ".mp4"
         temp_raw = os.path.join(TEMP_DIR, f"vid_raw_{uid}_{uuid.uuid4().hex}{ext}")
         webm_out = os.path.join(TEMP_DIR, f"vid_norm_{uid}_{uuid.uuid4().hex}.webm")
@@ -274,6 +302,44 @@ def register(app, fsub):
         input_path = session["video_path"]
         overlay_text = session.get("text")
 
+        if session.get("is_static"):
+            cleanup_temp_files(session.get("preview_path"))
+            out_prev_png = os.path.join(TEMP_DIR, f"vid_sprev_{uid}_{uuid.uuid4().hex}.png")
+            with open(input_path, "rb") as f:
+                raw_png = f.read()
+            if overlay_text:
+                raw_png = await asyncio.to_thread(add_text_to_image, raw_png, overlay_text, 48, "bottom")
+            with open(out_prev_png, "wb") as f:
+                f.write(raw_png)
+            session["preview_path"] = out_prev_png
+            session["webm_path"] = out_prev_png
+            session["step"] = "vid_preview"
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            pack_title = session.get("display_title", "Unknown Pack")
+            text_val = overlay_text or "None"
+            caption = small_caps(
+                f"📦 Pack: {pack_title}\n"
+                f"📝 Text: {text_val}\n"
+                f"🎭 Type: Static Sticker\n\n"
+                f"🖼 Preview Generated!"
+            )
+            if is_group and from_user:
+                mention = f"[{from_user.first_name}](tg://user?id={from_user.id})"
+                caption = f"{mention}\n\n{caption}"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Save To Pack", callback_data="vidpreview_save"),
+                 InlineKeyboardButton("🔄 Replace Media", callback_data="vidpreview_replace")],
+                [InlineKeyboardButton("✏ Edit Text", callback_data="vidpreview_edit"),
+                 InlineKeyboardButton("🗑 Remove Text", callback_data="vidpreview_removetext")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="vidflow_cancel")],
+            ])
+            sent_msg = await client.send_photo(chat_id=chat_id, photo=out_prev_png, caption=caption, reply_markup=kb)
+            session["preview_message"] = sent_msg
+            return
+
         cleanup_temp_files(session.get("preview_path"))
         output_preview = os.path.join(TEMP_DIR, f"vid_prev_{uid}_{uuid.uuid4().hex}.mp4")
 
@@ -355,31 +421,34 @@ def register(app, fsub):
         with open(webm_path, "rb") as f:
             video_bytes = f.read()
 
+        is_static = bool(session.get("is_static"))
+
         if not telegram_pack_name:
             await proc.edit_text(small_caps("⚙️ Creating Pack..."))
-            success, result, telegram_pack_name_new = await create_unique_video_sticker_pack(client, uid, display_title, video_bytes, emoji)
+            if is_static:
+                success, result, telegram_pack_name_new = await create_unique_sticker_pack(client, uid, display_title, video_bytes, emoji)
+            else:
+                success, result, telegram_pack_name_new = await create_unique_video_sticker_pack(client, uid, display_title, video_bytes, emoji)
             if not success:
                 cleanup_temp_files(session.get("video_path"), session.get("webm_path"), session.get("preview_path"))
                 vid_sessions.pop(uid, None)
                 await proc.edit_text(small_caps(f"❌ Failed to create pack: {result}"))
                 return
-            create_pack_record(uid, pack_index, display_title, telegram_pack_name_new, emoji, pack_type="video")
-            packs_collection.update_one(
-                {"user_id": str(uid), "pack_index": pack_index},
-                {"$set": {"preview_video_url": catbox_url}}
-            )
+            create_pack_record(uid, pack_index, display_title, telegram_pack_name_new, emoji, pack_type="static" if is_static else "video")
+            if catbox_url:
+                packs_collection.update_one(
+                    {"user_id": str(uid), "pack_index": pack_index},
+                    {"$set": {"preview_video_url": catbox_url}}
+                )
             telegram_pack_name = telegram_pack_name_new
         else:
-            if not is_new_pack and pack.get("pack_type", "static") != "video":
-                cleanup_temp_files(session.get("video_path"), session.get("webm_path"), session.get("preview_path"))
-                # BUG 3 FIX: Do NOT pop session on transient errors
-                await proc.edit_text(small_caps("❌ This is a static sticker pack. Video stickers cannot be added."))
-                return
-            success, err = await add_video_sticker_to_pack(client, uid, telegram_pack_name, video_bytes, emoji)
+            if is_static:
+                success, err = await add_sticker_to_pack(client, uid, telegram_pack_name, video_bytes, emoji)
+            else:
+                success, err = await add_video_sticker_to_pack(client, uid, telegram_pack_name, video_bytes, emoji)
             if not success:
                 cleanup_temp_files(session.get("video_path"), session.get("webm_path"), session.get("preview_path"))
-                # BUG 3 FIX: Do NOT pop session on transient errors
-                await proc.edit_text(small_caps(f"❌ Failed to add video sticker: {err}"))
+                await proc.edit_text(small_caps(f"❌ Failed to add sticker: {err}"))
                 return
 
         if not is_new_pack:
@@ -434,7 +503,7 @@ def register(app, fsub):
             return
 
         packs = get_user_packs(uid)
-        video_packs = [p for p in packs if p.get("pack_type") == "video"]
+        video_packs = packs  # Allow mixing static & video stickers in any pack
 
         if not video_packs:
             session = vid_sessions.pop(uid, None)

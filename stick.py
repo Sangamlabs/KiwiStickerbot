@@ -1087,6 +1087,13 @@ async def cancel_user_session(client: Client, user_id: int, chat_id: int = None,
     except Exception:
         pass
 
+    if clone_retry_cache.pop(uid, None) is not None:
+        cancelled_any = True
+
+    if uid in active_clone_uids:
+        cancelled_clone_uids.add(uid)
+        cancelled_any = True
+
     cancellation_text = small_caps(
         "❌ **Process Cancelled**\n\n"
         "Your current operation has been cancelled.\n"
@@ -1170,7 +1177,7 @@ _THIS_BOT_COMMANDS = {
     "grid", "split", "toemoji", "textemoji",
     "q", "quote", "r", "kang",
     "clonepack", "renamepack", "delpack", "mypacks", "setemoji", "reset",
-    "help", "cancel",
+    "help", "cancel", "refresh",
     "admin", "adminhelp", "stats", "btstats", "users", "ping", "restart",
     "bc", "fbc", "addsudo", "rmsudo", "delsudo", "removesudo", "sudolist", "admins",
     "setlog", "setlogger", "create",
@@ -1275,6 +1282,69 @@ async def global_cancel_cmd(client: Client, message: Message):
     uid = message.from_user.id
     await cancel_user_session(client, user_id=uid, trigger_message=message)
 register_user_command("cancel", "Cancel any active process and clear session.", category=CATEGORY_GENERAL)
+
+# ==============================================
+# /refresh COMMAND (Sync packs & reload DB data)
+# ==============================================
+@app.on_message(filters.command("refresh") & (filters.private | filters.group))
+async def refresh_cmd(client: Client, message: Message):
+    if not await fsub.check(client, message):
+        return
+    uid = message.from_user.id
+    proc = await reply_or_dm(client, message, small_caps("🔄 Refreshing bot & database data..."))
+
+    get_user_data(uid)
+    user_packs = get_user_packs(uid)
+    synced_packs = 0
+    for p in user_packs:
+        tg_name = p.get("telegram_pack_name")
+        if not tg_name:
+            continue
+        try:
+            st_set = await get_sticker_set(tg_name)
+            live_count = len(st_set.get("stickers", []))
+            packs_collection.update_one(
+                {"_id": p["_id"]},
+                {"$set": {"total_stickers": live_count}},
+            )
+            synced_packs += 1
+        except Exception:
+            pass
+
+    prem_packs = list(db["premium_packs"].find({"user_id": str(uid)}))
+    synced_emoji = 0
+    for ep in prem_packs:
+        pname = ep.get("pack_name")
+        if not pname:
+            continue
+        try:
+            st_set = await get_sticker_set(pname)
+            live_count = len(st_set.get("stickers", []))
+            db["premium_packs"].update_one(
+                {"_id": ep["_id"]},
+                {"$set": {"count": live_count}},
+            )
+            synced_emoji += 1
+        except Exception:
+            pass
+
+    extra_lines = ""
+    if is_admin(uid):
+        sudos = reload_sudo_admins(fsub)
+        fsub_cnt = len(fsub._channels())
+        extra_lines = (
+            f"\n🛡 **Sudo/Admin IDs Reloaded:** `{len(sudos)}`"
+            f"\n📢 **Force-Sub Channels Synced:** `{fsub_cnt}`"
+        )
+
+    await proc.edit_text(
+        small_caps(
+            f"✅ **Data Refreshed Successfully!**\n\n"
+            f"📦 **Sticker Packs Synced:** `{synced_packs}`\n"
+            f"✨ **Custom Emoji Packs Synced:** `{synced_emoji}`"
+        ) + extra_lines
+    )
+register_user_command("refresh", "Sync your packs and refresh bot data from DB.", category=CATEGORY_GENERAL)
 
 # ==============================================
 # /start
@@ -1680,6 +1750,8 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
     await _run_clone_job(uid, progress, job)
 
 clone_retry_cache = {}
+active_clone_uids = set()
+cancelled_clone_uids = set()
 
 async def _run_clone_job(uid: int, progress: Message, job: dict):
     display_title = job["display_title"]
@@ -1693,6 +1765,8 @@ async def _run_clone_job(uid: int, progress: Message, job: dict):
     total = job["total"]
     failed_items = []
 
+    cancelled_clone_uids.discard(uid)
+    active_clone_uids.add(uid)
     try:
         async with aiohttp.ClientSession() as http_session:
             if not telegram_pack_name:
@@ -1759,6 +1833,13 @@ async def _run_clone_job(uid: int, progress: Message, job: dict):
                         return await add_sticker_input_to_pack(uid, telegram_pack_name, item, session=http_session)
 
                 for chunk_start in range(0, len(items_to_add), 15):
+                    if uid in cancelled_clone_uids:
+                        cancelled_clone_uids.discard(uid)
+                        try:
+                            await progress.edit_text(small_caps(f"❌ Cloning cancelled by user.\n📊 Copied so far: {copied} / {total}"))
+                        except Exception:
+                            pass
+                        return
                     chunk = items_to_add[chunk_start:chunk_start + 15]
                     results = await asyncio.gather(*[_add_one(it) for it in chunk], return_exceptions=True)
                     for item, res in zip(chunk, results):
@@ -1785,6 +1866,9 @@ async def _run_clone_job(uid: int, progress: Message, job: dict):
         except Exception:
             pass
         return
+    finally:
+        active_clone_uids.discard(uid)
+        cancelled_clone_uids.discard(uid)
 
     packs_collection.update_one(
         {"user_id": str(uid), "pack_index": pack_index},
@@ -1905,7 +1989,7 @@ async def handle_delpack_index(client: Client, message: Message, uid):
 # ==============================================
 @app.on_message(
     filters.text & (filters.private | filters.group) &
-    ~filters.command(["sticker", "setemoji", "mypacks", "stats", "users", "reset", "start", "addchannel", "addch", "removechannel", "delchannel", "rmchannel", "remchannel", "remove", "channels", "listch", "listchannel", "listchannels", "mychats", "getid", "fsubdebug", "clonepack", "renamepack", "delpack", "q", "quote", "r", "kang", "pr", "premium", "done", "grid", "split", "toemoji", "textemoji", "setlog", "setlogger", "addsudo", "rmsudo", "delsudo", "removesudo", "sudolist", "admins", "fbc", "bc", "ping", "btstats", "restart", "help", "admin", "adminhelp", "create", "cancel"]),
+    ~filters.command(["sticker", "setemoji", "mypacks", "stats", "users", "reset", "start", "addchannel", "addch", "removechannel", "delchannel", "rmchannel", "remchannel", "remove", "channels", "listch", "listchannel", "listchannels", "mychats", "getid", "fsubdebug", "clonepack", "renamepack", "delpack", "q", "quote", "r", "kang", "pr", "premium", "done", "grid", "split", "toemoji", "textemoji", "setlog", "setlogger", "addsudo", "rmsudo", "delsudo", "removesudo", "sudolist", "admins", "fbc", "bc", "ping", "btstats", "restart", "help", "admin", "adminhelp", "create", "cancel", "refresh"]),
     group=6
 )
 async def handle_text(client: Client, message: Message):
