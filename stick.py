@@ -863,19 +863,20 @@ def _escape_ffmpeg_text(text):
     )
 
 async def normalize_video_sticker(input_path, output_path):
-    vf = "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black"
+    vf = "scale=512:512:force_original_aspect_ratio=decrease,fps=30"
     cmd = [
         FFMPEG_PATH, "-y",
         "-i", input_path,
         "-t", str(MAX_PREVIEW_SECONDS),
         "-vf", vf,
-        "-c:v", "libvpx",
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",
         "-b:v", "200k",
         "-maxrate", "250k",
         "-bufsize", "500k",
         "-an",
-        "-deadline", "good",
-        "-cpu-used", "4",
+        "-deadline", "realtime",
+        "-cpu-used", "6",
         "-auto-alt-ref", "0",
         output_path
     ]
@@ -896,13 +897,14 @@ async def normalize_video_sticker(input_path, output_path):
                 "-i", input_path,
                 "-t", str(MAX_PREVIEW_SECONDS),
                 "-vf", vf,
-                "-c:v", "libvpx",
-                "-b:v", "120k",
-                "-maxrate", "150k",
-                "-bufsize", "300k",
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuva420p",
+                "-b:v", "110k",
+                "-maxrate", "140k",
+                "-bufsize", "280k",
                 "-an",
-                "-deadline", "good",
-                "-cpu-used", "4",
+                "-deadline", "realtime",
+                "-cpu-used", "6",
                 "-auto-alt-ref", "0",
                 output_path
             ]
