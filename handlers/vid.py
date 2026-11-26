@@ -5,7 +5,7 @@ def register(app, fsub):
         get_user_packs, get_pack_by_index, get_user_pack,
         get_next_pack_index, create_pack_record, create_unique_video_sticker_pack,
         add_video_sticker_to_pack, create_unique_sticker_pack, add_sticker_to_pack,
-        normalize_sticker_png, add_text_to_image, increment_pack_sticker_count,
+        normalize_sticker_png, create_sticker, increment_pack_sticker_count,
         increment_sticker_count, generate_vid_preview, upload_to_catbox,
         normalize_video_sticker, cleanup_temp_files, probe_video_duration,
         cancel_user_session, MAX_PREVIEW_SECONDS, DURATION_TOLERANCE,
@@ -308,7 +308,7 @@ def register(app, fsub):
             with open(input_path, "rb") as f:
                 raw_png = f.read()
             if overlay_text:
-                raw_png = await asyncio.to_thread(add_text_to_image, raw_png, overlay_text, 48, "bottom")
+                raw_png = await asyncio.to_thread(create_sticker, raw_png, overlay_text, "bot")
             with open(out_prev_png, "wb") as f:
                 f.write(raw_png)
             session["preview_path"] = out_prev_png
