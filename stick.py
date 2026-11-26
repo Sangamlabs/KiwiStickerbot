@@ -1641,80 +1641,125 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
     first_emoji = input_stickers[0]["emoji_list"][0]
 
     copied = 0
-    failed = 0
     telegram_pack_name = None
+
+    job = {
+        "display_title": display_title,
+        "input_stickers": input_stickers,
+        "pack_index": pack_index,
+        "pack_type": pack_type,
+        "src_sticker_type": src_sticker_type,
+        "first_emoji": first_emoji,
+        "telegram_pack_name": None,
+        "copied": 0,
+        "total": total,
+        "failed_items": [],
+    }
+    await _run_clone_job(uid, progress, job)
+
+clone_retry_cache = {}
+
+async def _run_clone_job(uid: int, progress: Message, job: dict):
+    display_title = job["display_title"]
+    input_stickers = job["input_stickers"]
+    pack_index = job["pack_index"]
+    pack_type = job["pack_type"]
+    src_sticker_type = job["src_sticker_type"]
+    first_emoji = job["first_emoji"]
+    telegram_pack_name = job.get("telegram_pack_name")
+    copied = job.get("copied", 0)
+    total = job["total"]
+    failed_items = []
 
     try:
         async with aiohttp.ClientSession() as http_session:
-            # Step 1: Try batch-10 for video (fast & safe), batch-50 for static, then probe first 3 stickers
-            batch_size = 10 if pack_type == "video" else 50
-            first_batch = input_stickers[:batch_size]
-            success, result, telegram_pack_name = await create_unique_sticker_pack_from_input(
-                uid, display_title, first_batch, session=http_session, sticker_type=src_sticker_type
-            )
+            if not telegram_pack_name:
+                # Fresh pack creation
+                batch_size = 10 if pack_type == "video" else 50
+                first_batch = input_stickers[:batch_size]
+                success, result, telegram_pack_name = await create_unique_sticker_pack_from_input(
+                    uid, display_title, first_batch, session=http_session, sticker_type=src_sticker_type
+                )
 
-            if success:
-                copied = len(first_batch)
-                start_idx = len(first_batch)
+                if success:
+                    copied = len(first_batch)
+                    items_to_add = input_stickers[len(first_batch):]
+                else:
+                    print(f"[CLONEPACK] Batch-{batch_size} failed ({result}), trying single sticker...")
+                    try:
+                        await progress.edit_text(small_caps(f"⚙️ Batch skipped, creating pack 1-by-1...\n\n0 / {total} copied..."))
+                    except Exception:
+                        pass
+                    created_single = False
+                    last_err = result or "Timeout"
+                    first_ok_idx = 0
+                    for probe_idx, probe_item in enumerate(input_stickers[:3]):
+                        ok_s, res_s, cand_name = await create_unique_sticker_pack_from_input(
+                            uid, display_title, [probe_item], session=http_session, sticker_type=src_sticker_type
+                        )
+                        if ok_s:
+                            created_single = True
+                            telegram_pack_name = cand_name
+                            first_ok_idx = probe_idx
+                            copied = 1
+                            failed_items.extend(input_stickers[:probe_idx])
+                            break
+                        last_err = res_s or "Timeout"
+
+                    if not created_single:
+                        job["telegram_pack_name"] = None
+                        clone_retry_cache[uid] = job
+                        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry Cloning", callback_data="clone_retry")]])
+                        await progress.edit_text(
+                            small_caps(f"❌ Unable to create the cloned sticker pack:\n{last_err}\n\nTap Retry below after a few seconds."),
+                            reply_markup=kb,
+                        )
+                        return
+                    items_to_add = input_stickers[first_ok_idx + 1:]
+
+                job["telegram_pack_name"] = telegram_pack_name
+                job["copied"] = copied
+                create_pack_record(uid, pack_index, display_title, telegram_pack_name, first_emoji, pack_type=pack_type)
             else:
-                print(f"[CLONEPACK] Batch-{batch_size} failed ({result}), trying single sticker...")
-                try:
-                    await progress.edit_text(small_caps(f"⚙️ Batch skipped, creating pack 1-by-1...\n\n0 / {total} copied..."))
-                except Exception:
-                    pass
-                created_single = False
-                last_err = result or "Timeout"
-                first_ok_idx = 0
-                for probe_idx, probe_item in enumerate(input_stickers[:3]):
-                    ok_s, res_s, cand_name = await create_unique_sticker_pack_from_input(
-                        uid, display_title, [probe_item], session=http_session, sticker_type=src_sticker_type
-                    )
-                    if ok_s:
-                        created_single = True
-                        telegram_pack_name = cand_name
-                        first_ok_idx = probe_idx
-                        copied = 1
-                        failed += probe_idx
-                        break
-                    last_err = res_s or "Timeout"
+                # Resuming failed items into existing pack
+                items_to_add = job.get("failed_items", [])
 
-                if not created_single:
-                    await progress.edit_text(small_caps(f"❌ Unable to create the cloned sticker pack: {last_err}"))
-                    return
-                start_idx = first_ok_idx + 1
-
-            create_pack_record(uid, pack_index, display_title, telegram_pack_name, first_emoji, pack_type=pack_type)
-
-            if start_idx < total:
+            if items_to_add:
                 try:
                     await progress.edit_text(small_caps(f"⚡ Fast-Cloning Sticker Pack...\n\n{copied} / {total} copied..."))
                 except Exception:
                     pass
 
-                # 3 concurrent requests avoids Telegram 429 flood waits on video packs
                 sem = asyncio.Semaphore(3)
 
                 async def _add_one(item):
                     async with sem:
                         return await add_sticker_input_to_pack(uid, telegram_pack_name, item, session=http_session)
 
-                remaining = input_stickers[start_idx:]
-                for chunk_start in range(0, len(remaining), 15):
-                    chunk = remaining[chunk_start:chunk_start + 15]
+                for chunk_start in range(0, len(items_to_add), 15):
+                    chunk = items_to_add[chunk_start:chunk_start + 15]
                     results = await asyncio.gather(*[_add_one(it) for it in chunk], return_exceptions=True)
-                    for res in results:
+                    for item, res in zip(chunk, results):
                         if isinstance(res, tuple) and res[0]:
                             copied += 1
                         else:
-                            failed += 1
+                            failed_items.append(item)
+                    job["copied"] = copied
                     try:
                         await progress.edit_text(small_caps(f"⚡ Fast-Cloning Sticker Pack...\n\n{copied} / {total} copied..."))
                     except Exception:
                         pass
     except Exception as e:
         print(f"[CLONEPACK] Unexpected error: {type(e).__name__}: {e}")
+        job["copied"] = copied
+        job["failed_items"] = failed_items
+        clone_retry_cache[uid] = job
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry Cloning", callback_data="clone_retry")]])
         try:
-            await progress.edit_text(small_caps(f"❌ Cloning error: {str(e) or type(e).__name__}"))
+            await progress.edit_text(
+                small_caps(f"❌ Cloning error: {str(e) or type(e).__name__}\n\nTap Retry below."),
+                reply_markup=kb,
+            )
         except Exception:
             pass
         return
@@ -1724,21 +1769,35 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
         {"$set": {"total_stickers": copied}}
     )
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌟 Open Sticker Pack", url=f"https://t.me/addstickers/{telegram_pack_name}")]
-    ])
+    buttons = [[InlineKeyboardButton("🌟 Open Sticker Pack", url=f"https://t.me/addstickers/{telegram_pack_name}")]]
+    if failed_items:
+        job["failed_items"] = failed_items
+        clone_retry_cache[uid] = job
+        buttons.append([InlineKeyboardButton(f"🔄 Retry {len(failed_items)} Failed", callback_data="clone_retry")])
+    else:
+        clone_retry_cache.pop(uid, None)
+
     await progress.edit_text(
         small_caps(
             f"✅ Sticker Pack Cloned Successfully!\n"
             f"📦 Pack Index: {pack_index}\n"
             f"📝 Name: {display_title}\n"
             f"📊 Stickers Copied: {copied} / {total}\n"
-            f"❌ Failed: {failed}"
+            f"❌ Failed: {len(failed_items)}"
         ),
-        reply_markup=kb
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-    user_sessions.pop(uid, None)
+@app.on_callback_query(filters.regex(r"^clone_retry$"))
+async def clone_retry_cb(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    job = clone_retry_cache.get(uid)
+    if not job:
+        await callback.answer("Retry session expired. Start again with /clonepack.", show_alert=True)
+        return
+    await callback.answer("Retrying...")
+    await callback.message.edit_text(small_caps(f"🔄 Retrying Clone...\n\n{job.get('copied', 0)} / {job['total']} copied..."))
+    await _run_clone_job(uid, callback.message, job)
 
 # ==============================================
 # STEP HANDLERS FOR /renamepack
