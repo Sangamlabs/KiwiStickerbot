@@ -2147,8 +2147,54 @@ async def set_emoji_cmd(client: Client, message: Message):
 register_user_command("setemoji", "Choose the default emoji for new stickers.", category=CATEGORY_STICKER)
 
 # ==============================================
-# /mypacks
+# /mypacks (10 per page in expandable blockquote + Previous / Next / Close)
 # ==============================================
+MYPACKS_PAGE_SIZE = 10
+
+def _build_mypacks_page(uid: int, packs: list, page: int = 0):
+    total = len(packs)
+    total_pages = max(1, (total + MYPACKS_PAGE_SIZE - 1) // MYPACKS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * MYPACKS_PAGE_SIZE
+    end = start + MYPACKS_PAGE_SIZE
+    chunk = packs[start:end]
+
+    lines = []
+    for pack in chunk:
+        idx = pack["pack_index"]
+        title = html.escape(str(pack.get("display_title") or f"Pack {idx}"))
+        tg_name = pack.get("telegram_pack_name")
+        ptype = pack.get("pack_type", "static")
+        icon = "🎥" if ptype == "video" else "🖼"
+        count = pack.get("total_stickers", 0)
+        if tg_name:
+            link_part = f'<a href="https://t.me/addstickers/{tg_name}">Open Pack</a>'
+        else:
+            link_part = "No Link Yet"
+        lines.append(
+            f"<b>[{idx}] {title}</b>\n"
+            f"├ 🔗 {link_part}\n"
+            f"└ {icon} <code>{ptype}</code> • 🎨 <code>{count}</code>"
+        )
+
+    header = f"📦 <b>Your Sticker Packs</b>  (Page {page + 1}/{total_pages} • Total: {total})"
+    body = "<blockquote expandable>\n" + "\n\n".join(lines) + "\n</blockquote>"
+    text = f"{header}\n\n{body}"
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"mypacks_page|{uid}|{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="mypacks_noop"))
+    if page + 1 < total_pages:
+        nav_row.append(InlineKeyboardButton("➡️ Next", callback_data=f"mypacks_page|{uid}|{page + 1}"))
+
+    kb = InlineKeyboardMarkup([
+        nav_row,
+        [InlineKeyboardButton("❌ Close", callback_data=f"mypacks_close|{uid}")],
+    ])
+    return text, kb
+
 @app.on_message(filters.command("mypacks") & (filters.private | filters.group))
 async def mypacks_cmd(client: Client, message: Message):
     if not await fsub.check(client, message):
@@ -2160,26 +2206,58 @@ async def mypacks_cmd(client: Client, message: Message):
         await reply_or_dm(client, message, small_caps("You have no sticker packs yet. Create one with /sticker or /plain."))
         return
 
-    blocks = [small_caps("📦 Your Sticker Packs")]
-    for pack in packs:
-        telegram_name = pack.get("telegram_pack_name")
-        if telegram_name:
-            link_line = f"🔗 https://t.me/addstickers/{telegram_name}\n"
-        else:
-            link_line = small_caps("🔗 No Telegram Pack Yet") + "\n"
-        preview_line = ""
-        if pack.get("preview_video_url"):
-            preview_line = small_caps("🎬 Preview Available") + "\n"
-        else:
-            preview_line = small_caps("❌ No Preview") + "\n"
-        blocks.append(
-            small_caps(f"[{pack['pack_index']}] {pack['display_title']}") + "\n"
-            + link_line
-            + small_caps(f"🎨 Stickers: {pack.get('total_stickers', 0)}") + "\n"
-            + preview_line
-        )
+    text, kb = _build_mypacks_page(uid, packs, page=0)
+    await message.reply_text(
+        text,
+        reply_markup=kb,
+        parse_mode=HTML_PARSE_MODE,
+        disable_web_page_preview=True,
+    )
 
-    await reply_or_dm(client, message, "\n\n".join(blocks))
+@app.on_callback_query(filters.regex(r"^mypacks_page\|(\d+)\|(\d+)$"))
+async def mypacks_page_cb(client: Client, callback: CallbackQuery):
+    owner_uid = int(callback.matches[0].group(1))
+    page = int(callback.matches[0].group(2))
+    if callback.from_user.id != owner_uid:
+        await callback.answer("This menu belongs to someone else!", show_alert=True)
+        return
+
+    packs = get_user_packs(owner_uid)
+    if not packs:
+        await callback.answer("No packs found.", show_alert=True)
+        return
+
+    text, kb = _build_mypacks_page(owner_uid, packs, page=page)
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb,
+            parse_mode=HTML_PARSE_MODE,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+
+@app.on_callback_query(filters.regex(r"^mypacks_close\|(\d+)$"))
+async def mypacks_close_cb(client: Client, callback: CallbackQuery):
+    owner_uid = int(callback.matches[0].group(1))
+    if callback.from_user.id != owner_uid:
+        await callback.answer("This menu belongs to someone else!", show_alert=True)
+        return
+    await callback.answer("Closed")
+    try:
+        await callback.message.delete()
+    except Exception:
+        try:
+            await callback.message.edit_text("❌ Closed.")
+        except Exception:
+            pass
+
+@app.on_callback_query(filters.regex(r"^mypacks_noop$"))
+async def mypacks_noop_cb(client: Client, callback: CallbackQuery):
+    await callback.answer()
+
 register_user_command("mypacks", "View and manage your sticker packs.", category=CATEGORY_STICKER)
 
 # ==============================================
