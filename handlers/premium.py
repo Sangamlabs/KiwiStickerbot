@@ -61,7 +61,7 @@ async def _normalize_emoji_webm(ffmpeg_path: str, input_path: str, output_path: 
         "fps=30"
     )
     input_args = ["-c:v", "libvpx-vp9", "-i", input_path] if is_webm_input else ["-i", input_path]
-    for bitrate, maxrate, bufsize in (("180k", "220k", "400k"), ("95k", "120k", "240k")):
+    for bitrate, maxrate, bufsize in (("125k", "160k", "320k"), ("85k", "110k", "220k")):
         cmd = [
             ffmpeg_path, "-y",
             *input_args,

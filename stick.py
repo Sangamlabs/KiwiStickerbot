@@ -728,11 +728,12 @@ async def set_sticker_set_title(pack_name, title):
 async def _bot_api_json(method, payload, session=None):
     """Send a Bot API POST request, optionally reusing a keep-alive ClientSession."""
     url = f"{TELEGRAM_BOT_API_BASE}/{method}"
+    req_timeout = aiohttp.ClientTimeout(total=30)
     if session is not None:
-        async with session.post(url, json=payload) as resp:
+        async with session.post(url, json=payload, timeout=req_timeout) as resp:
             result = await resp.json()
     else:
-        async with aiohttp.ClientSession() as temp_session:
+        async with aiohttp.ClientSession(timeout=req_timeout) as temp_session:
             async with temp_session.post(url, json=payload) as resp:
                 result = await resp.json()
     if not result.get("ok"):
@@ -1601,8 +1602,9 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
     telegram_pack_name = None
 
     async with aiohttp.ClientSession() as http_session:
-        # Step 1: Try creating the pack with up to 50 stickers in ONE single API call
-        first_batch = input_stickers[:50]
+        # Step 1: Try batch-50, then batch-20 (lighter for video packs), then first working sticker
+        batch_size = 20 if pack_type == "video" else 50
+        first_batch = input_stickers[:batch_size]
         success, result, telegram_pack_name = await create_unique_sticker_pack_from_input(
             uid, display_title, first_batch, session=http_session, sticker_type=src_sticker_type
         )
@@ -1611,16 +1613,27 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
             copied = len(first_batch)
             start_idx = len(first_batch)
         else:
-            print(f"[CLONEPACK] Batch-50 failed ({result}), falling back to 1-by-1...")
-            success_single, result_single, telegram_pack_name = await create_unique_sticker_pack_from_input(
-                uid, display_title, [input_stickers[0]], session=http_session, sticker_type=src_sticker_type
-            )
-            if not success_single:
-                await progress.edit_text(small_caps(f"❌ Unable to create the cloned sticker pack: {result_single}"))
-                user_sessions.pop(uid, None)
+            print(f"[CLONEPACK] Batch-{batch_size} failed ({result}), trying first working sticker...")
+            created_single = False
+            last_err = result
+            first_ok_idx = 0
+            for probe_idx, probe_item in enumerate(input_stickers[:10]):
+                ok_s, res_s, cand_name = await create_unique_sticker_pack_from_input(
+                    uid, display_title, [probe_item], session=http_session, sticker_type=src_sticker_type
+                )
+                if ok_s:
+                    created_single = True
+                    telegram_pack_name = cand_name
+                    first_ok_idx = probe_idx
+                    copied = 1
+                    failed += probe_idx
+                    break
+                last_err = res_s
+
+            if not created_single:
+                await progress.edit_text(small_caps(f"❌ Unable to create the cloned sticker pack: {last_err}"))
                 return
-            copied = 1
-            start_idx = 1
+            start_idx = first_ok_idx + 1
 
         create_pack_record(uid, pack_index, display_title, telegram_pack_name, first_emoji, pack_type=pack_type)
 
@@ -1630,7 +1643,8 @@ async def handle_clonepack_name(client: Client, message: Message, uid):
             except Exception:
                 pass
 
-            sem = asyncio.Semaphore(5)
+            # 3 concurrent requests avoids Telegram 429 flood waits on video packs
+            sem = asyncio.Semaphore(3)
 
             async def _add_one(item):
                 async with sem:

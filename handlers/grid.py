@@ -553,34 +553,36 @@ def register(app, fsub):
 
             async with aiohttp.ClientSession() as http_session:
                 dl_sem = asyncio.Semaphore(10)
+                ffmpeg_sem = asyncio.Semaphore(2)  # Prevent CPU thrashing on Railway/VPS
 
                 async def _convert_one(st):
                     async with dl_sem:
                         fid = st["file_id"]
                         em = st.get("emoji") or "⭐"
                         raw_bytes = await _fast_download_bytes(fid, http_session)
-                        if st.get("is_animated"):
-                            if len(raw_bytes) > MAX_TGS_BYTES:
-                                return None
-                            return (raw_bytes, "animated", "e.tgs", "application/x-tgsticker", em)
-                        elif st.get("is_video"):
-                            raw_p = os.path.join(TEMP_DIR, f"grd_r_{uid}_{uuid.uuid4().hex}.webm")
-                            out_p = os.path.join(TEMP_DIR, f"grd_o_{uid}_{uuid.uuid4().hex}.webm")
-                            try:
-                                with open(raw_p, "wb") as f:
-                                    f.write(raw_bytes)
+                    if st.get("is_animated"):
+                        if len(raw_bytes) > MAX_TGS_BYTES:
+                            return None
+                        return (raw_bytes, "animated", "e.tgs", "application/x-tgsticker", em)
+                    elif st.get("is_video"):
+                        raw_p = os.path.join(TEMP_DIR, f"grd_r_{uid}_{uuid.uuid4().hex}.webm")
+                        out_p = os.path.join(TEMP_DIR, f"grd_o_{uid}_{uuid.uuid4().hex}.webm")
+                        try:
+                            with open(raw_p, "wb") as f:
+                                f.write(raw_bytes)
+                            async with ffmpeg_sem:
                                 ok, _ = await _normalize_emoji_webm(FFMPEG_PATH, raw_p, out_p, is_webm_input=True)
                                 if not ok:
                                     ok, _ = await _normalize_emoji_webm(FFMPEG_PATH, raw_p, out_p, is_webm_input=False)
-                                if not ok:
-                                    return None
-                                with open(out_p, "rb") as f:
-                                    return (f.read(), "video", "e.webm", "video/webm", em)
-                            finally:
-                                cleanup_temp_files(raw_p, out_p)
-                        else:
-                            png = await asyncio.to_thread(_normalize_emoji_png, raw_bytes)
-                            return (png, "static", "e.png", "image/png", em)
+                            if not ok:
+                                return None
+                            with open(out_p, "rb") as f:
+                                return (f.read(), "video", "e.webm", "video/webm", em)
+                        finally:
+                            cleanup_temp_files(raw_p, out_p)
+                    else:
+                        png = await asyncio.to_thread(_normalize_emoji_png, raw_bytes)
+                        return (png, "static", "e.png", "image/png", em)
 
                 converted = []
                 failed = 0
