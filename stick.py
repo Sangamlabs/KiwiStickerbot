@@ -1164,6 +1164,19 @@ async def reply_or_dm(client, message, text, reply_markup=None, parse_mode=None)
 # ==============================================
 # GROUP FIRST-TIME START GATE
 # ==============================================
+_THIS_BOT_COMMANDS = {
+    "start", "sticker", "plain", "vid", "pr", "premium", "done",
+    "grid", "split", "toemoji", "textemoji",
+    "q", "quote", "r", "kang",
+    "clonepack", "renamepack", "delpack", "mypacks", "setemoji", "reset",
+    "help", "cancel",
+    "admin", "adminhelp", "stats", "btstats", "users", "ping", "restart",
+    "bc", "fbc", "addsudo", "rmsudo", "delsudo", "removesudo", "sudolist", "admins",
+    "setlog", "setlogger", "create",
+    "addchannel", "addch", "removechannel", "delchannel", "rmchannel", "remchannel", "remove",
+    "channels", "listch", "listchannel", "listchannels", "mychats", "getid", "fsubdebug",
+}
+
 @app.on_message(filters.group & filters.text & filters.regex(r'^/\w'), group=-1)
 async def group_start_gate(client: Client, message: Message):
     # Track group in bot_known_chats for /bc & /fbc group broadcasts
@@ -1181,14 +1194,28 @@ async def group_start_gate(client: Client, message: Message):
     except Exception:
         pass
 
+    # Only gate commands that belong to THIS bot (ignore other bots' commands)
+    first_token = (message.text or "").split()[0].lstrip("/")
+    if "@" in first_token:
+        cmd_name, target_bot = first_token.split("@", 1)
+        my_uname = (_resolve_bot_username(client) or "").lower()
+        if my_uname and target_bot.lower() != my_uname:
+            return
+    else:
+        cmd_name = first_token
+
+    if cmd_name.lower() not in _THIS_BOT_COMMANDS:
+        return
+
     if not message.from_user:
         return
     uid = message.from_user.id
     if has_started_bot(uid):
         return
 
+    bot_uname = _resolve_bot_username(client) or "KiwiStickerRobot"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Start in DM", url=f"https://t.me/{BOT_USERNAME}?start=start")]
+        [InlineKeyboardButton("🚀 Start in DM", url=f"https://t.me/{bot_uname}?start=start")]
     ])
     await message.reply_text(
         small_caps("👋 You need to start me in private first.\nPress the button below."),
