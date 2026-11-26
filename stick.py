@@ -1178,6 +1178,21 @@ _THIS_BOT_COMMANDS = {
     "channels", "listch", "listchannel", "listchannels", "mychats", "getid", "fsubdebug",
 }
 
+def _extract_bot_cmd(client, text: str):
+    """Return lowercase command name if text is a command for THIS bot, else None."""
+    if not text or not text.startswith("/"):
+        return None
+    first_token = text.split()[0].lstrip("/")
+    if "@" in first_token:
+        cmd_name, target_bot = first_token.split("@", 1)
+        my_uname = (_resolve_bot_username(client) or "").lower()
+        if my_uname and target_bot.lower() != my_uname:
+            return None
+    else:
+        cmd_name = first_token
+    cmd_low = cmd_name.lower()
+    return cmd_low if cmd_low in _THIS_BOT_COMMANDS else None
+
 @app.on_message(filters.group & filters.text & filters.regex(r'^/\w'), group=-1)
 async def group_start_gate(client: Client, message: Message):
     # Track group in bot_known_chats for /bc & /fbc group broadcasts
@@ -1195,17 +1210,7 @@ async def group_start_gate(client: Client, message: Message):
     except Exception:
         pass
 
-    # Only gate commands that belong to THIS bot (ignore other bots' commands)
-    first_token = (message.text or "").split()[0].lstrip("/")
-    if "@" in first_token:
-        cmd_name, target_bot = first_token.split("@", 1)
-        my_uname = (_resolve_bot_username(client) or "").lower()
-        if my_uname and target_bot.lower() != my_uname:
-            return
-    else:
-        cmd_name = first_token
-
-    if cmd_name.lower() not in _THIS_BOT_COMMANDS:
+    if not _extract_bot_cmd(client, message.text):
         return
 
     if not message.from_user:
@@ -1223,6 +1228,39 @@ async def group_start_gate(client: Client, message: Message):
         reply_markup=kb
     )
     raise StopPropagation
+
+# ==============================================
+# GLOBAL 20s COMMAND RATE LIMIT (FLOOD WAIT)
+# ==============================================
+COMMAND_COOLDOWN_SECONDS = int(os.getenv("COMMAND_COOLDOWN_SECONDS", "20"))
+_cmd_cooldowns = {}
+_RATE_LIMIT_EXEMPT_CMDS = {"cancel", "done"}
+
+@app.on_message((filters.private | filters.group) & filters.text & filters.regex(r'^/\w'), group=-1)
+async def cmd_rate_limit_gate(client: Client, message: Message):
+    if not message.from_user:
+        return
+    cmd_low = _extract_bot_cmd(client, message.text)
+    if not cmd_low or cmd_low in _RATE_LIMIT_EXEMPT_CMDS:
+        return
+
+    uid = message.from_user.id
+    if is_admin(uid):
+        return
+
+    now = time.time()
+    last = _cmd_cooldowns.get(uid, 0.0)
+    elapsed = now - last
+    if elapsed < COMMAND_COOLDOWN_SECONDS:
+        wait_sec = max(1, int(COMMAND_COOLDOWN_SECONDS - elapsed) + 1)
+        await reply_or_dm(
+            client,
+            message,
+            small_caps(f"⏳ Flood Wait: Please wait {wait_sec}s before using another command."),
+        )
+        raise StopPropagation
+
+    _cmd_cooldowns[uid] = now
 
 # ==============================================
 # GLOBAL /cancel COMMAND
