@@ -14,6 +14,7 @@ import html
 import os
 from datetime import datetime
 
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus, ParseMode
 from pyrogram.types import ChatMemberUpdated, Message
@@ -38,10 +39,30 @@ def get_logger_chat_id(db) -> int | None:
 
 
 async def send_log(client: Client, db, text: str):
-    """Safely send an HTML log message to the configured Logger Group."""
+    """Safely send an HTML log message to the configured Logger Group via Bot API (works on fresh sessions)."""
     chat_id = get_logger_chat_id(db)
     if not chat_id:
         return
+
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    if bot_token:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    res = await resp.json()
+            if res.get("ok"):
+                return
+            print(f"[logger.py] Bot API sendMessage failed for {chat_id}: {res.get('description')}")
+        except Exception as e:
+            print(f"[logger.py] Bot API send_log error for {chat_id}: {e}")
+
     try:
         await client.send_message(
             chat_id,
