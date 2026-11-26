@@ -2160,26 +2160,28 @@ def _build_mypacks_page(uid: int, packs: list, page: int = 0):
     end = start + MYPACKS_PAGE_SIZE
     chunk = packs[start:end]
 
-    lines = []
+    blocks = []
     for pack in chunk:
         idx = pack["pack_index"]
-        title = html.escape(str(pack.get("display_title") or f"Pack {idx}"))
-        tg_name = pack.get("telegram_pack_name")
-        ptype = pack.get("pack_type", "static")
-        icon = "🎥" if ptype == "video" else "🖼"
-        count = pack.get("total_stickers", 0)
-        if tg_name:
-            link_part = f'<a href="https://t.me/addstickers/{tg_name}">Open Pack</a>'
+        title = html.escape(small_caps(f"[{idx}] {pack['display_title']}"))
+        telegram_name = pack.get("telegram_pack_name")
+        if telegram_name:
+            link_line = f"🔗 https://t.me/addstickers/{telegram_name}\n"
         else:
-            link_part = "No Link Yet"
-        lines.append(
-            f"<b>[{idx}] {title}</b>\n"
-            f"├ 🔗 {link_part}\n"
-            f"└ {icon} <code>{ptype}</code> • 🎨 <code>{count}</code>"
+            link_line = html.escape(small_caps("🔗 No Telegram Pack Yet")) + "\n"
+        if pack.get("preview_video_url"):
+            preview_line = html.escape(small_caps("🎬 Preview Available"))
+        else:
+            preview_line = html.escape(small_caps("❌ No Preview"))
+        blocks.append(
+            title + "\n"
+            + link_line
+            + html.escape(small_caps(f"🎨 Stickers: {pack.get('total_stickers', 0)}")) + "\n"
+            + preview_line
         )
 
-    header = f"📦 <b>Your Sticker Packs</b>  (Page {page + 1}/{total_pages} • Total: {total})"
-    body = "<blockquote expandable>\n" + "\n\n".join(lines) + "\n</blockquote>"
+    header = html.escape(small_caps(f"📦 Your Sticker Packs (Page {page + 1}/{total_pages})"))
+    body = "<blockquote expandable>\n" + "\n\n".join(blocks) + "\n</blockquote>"
     text = f"{header}\n\n{body}"
 
     nav_row = []
