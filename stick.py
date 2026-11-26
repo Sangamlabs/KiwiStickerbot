@@ -1209,20 +1209,23 @@ register_user_command("cancel", "Cancel any active process and clear session.", 
 # /start
 # ==============================================
 def _build_start_caption():
-    return small_caps(
-        "🌟 **Kiwi Sticker Bot** 🌟\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Welcome! Fast Sticker & Custom Emoji Maker Bot for Telegram.\n\n"
-        "🖼 **/sticker** — Text-overlaid sticker\n"
-        "🖼 **/plain** — Plain sticker (no text)\n"
-        "🎥 **/vid** — Video sticker (MP4 / WEBM / GIF)\n"
-        "✨ **/pr** — Premium Custom Emoji Pack\n"
-        "🧩 **/grid** — Photo Grid, Text & Pack Converter\n"
-        "💬 **/q / /r** — Quote-card sticker\n"
-        "🧲 **/kang** — Save sticker to new/existing pack\n"
-        "⚡ **/clonepack** — Fast clone sticker packs\n"
-        "📦 **/mypacks** — View & manage your packs\n\n"
-        "🚀 Tap **Commands** below or send /help to begin!"
+    title_block = small_caps("🌟 Kiwi Sticker Maker Bot 🌟\nFast Sticker & Custom Emoji Maker Bot for Telegram.")
+    cmds_block = "\n".join([
+        f"🖼 <code>/sticker</code> — {small_caps('Text-overlaid sticker')}",
+        f"🖼 <code>/plain</code> — {small_caps('Plain sticker (no text)')}",
+        f"🎥 <code>/vid</code> — {small_caps('Video sticker (MP4 / WEBM / GIF)')}",
+        f"✨ <code>/pr</code> — {small_caps('Premium Custom Emoji Pack')}",
+        f"🧩 <code>/grid</code> — {small_caps('Photo Grid, Text & Pack Converter')}",
+        f"💬 <code>/q</code> / <code>/r</code> — {small_caps('Quote-card sticker')}",
+        f"🧲 <code>/kang</code> — {small_caps('Save sticker to new/existing pack')}",
+        f"⚡ <code>/clonepack</code> — {small_caps('Fast clone sticker packs')}",
+        f"📦 <code>/mypacks</code> — {small_caps('View & manage your packs')}",
+    ])
+    footer = small_caps("🚀 Tap Commands below or send /help to begin!")
+    return (
+        f"<blockquote><b>{title_block}</b></blockquote>\n\n"
+        f"<blockquote>{cmds_block}</blockquote>\n\n"
+        f"{footer}"
     )
 
 def _build_start_keyboard(client=None):
@@ -1276,12 +1279,18 @@ async def start_cmd(client: Client, message: Message):
 
     if start_photo:
         try:
-            await message.reply_photo(photo=start_photo, caption=caption, reply_markup=kb)
+            await message.reply_photo(
+                photo=start_photo,
+                caption=caption,
+                reply_markup=kb,
+                has_spoiler=True,
+                parse_mode=HTML_PARSE_MODE,
+            )
             return
         except Exception as e:
             print(f"[START] Failed to send START_PHOTO ({start_photo}): {e}")
 
-    await message.reply_text(caption, reply_markup=kb)
+    await message.reply_text(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
 
 @app.on_callback_query(filters.regex(r"^start_help_menu$"))
 async def start_help_menu_cb(client: Client, callback: CallbackQuery):
@@ -1309,9 +1318,9 @@ async def start_back_home_cb(client: Client, callback: CallbackQuery):
     await callback.answer()
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption, reply_markup=kb)
+            await callback.message.edit_caption(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
         else:
-            await callback.message.edit_text(caption, reply_markup=kb)
+            await callback.message.edit_text(caption, reply_markup=kb, parse_mode=HTML_PARSE_MODE)
     except Exception:
         pass
 register_user_command("start", "Start the bot and see the welcome message.", category=CATEGORY_GENERAL)
