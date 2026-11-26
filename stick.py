@@ -1193,7 +1193,7 @@ def _extract_bot_cmd(client, text: str):
     cmd_low = cmd_name.lower()
     return cmd_low if cmd_low in _THIS_BOT_COMMANDS else None
 
-@app.on_message(filters.group & filters.text & filters.regex(r'^/\w'), group=-1)
+@app.on_message(filters.group & filters.text & filters.regex(r'^/\w'), group=-3)
 async def group_start_gate(client: Client, message: Message):
     # Track group in bot_known_chats for /bc & /fbc group broadcasts
     try:
@@ -1234,9 +1234,10 @@ async def group_start_gate(client: Client, message: Message):
 # ==============================================
 COMMAND_COOLDOWN_SECONDS = int(os.getenv("COMMAND_COOLDOWN_SECONDS", "20"))
 _cmd_cooldowns = {}
+_cooldown_warned = {}
 _RATE_LIMIT_EXEMPT_CMDS = {"cancel", "done"}
 
-@app.on_message((filters.private | filters.group) & filters.text & filters.regex(r'^/\w'), group=-1)
+@app.on_message((filters.private | filters.group) & filters.text & filters.regex(r'^/\w'), group=-2)
 async def cmd_rate_limit_gate(client: Client, message: Message):
     if not message.from_user:
         return
@@ -1252,15 +1253,19 @@ async def cmd_rate_limit_gate(client: Client, message: Message):
     last = _cmd_cooldowns.get(uid, 0.0)
     elapsed = now - last
     if elapsed < COMMAND_COOLDOWN_SECONDS:
-        wait_sec = max(1, int(COMMAND_COOLDOWN_SECONDS - elapsed) + 1)
-        await reply_or_dm(
-            client,
-            message,
-            small_caps(f"⏳ Flood Wait: Please wait {wait_sec}s before using another command."),
-        )
+        # Warn once per cooldown window so spamming commands doesn't spam the GC
+        if _cooldown_warned.get(uid, 0.0) != last:
+            _cooldown_warned[uid] = last
+            wait_sec = max(1, int(COMMAND_COOLDOWN_SECONDS - elapsed) + 1)
+            await reply_or_dm(
+                client,
+                message,
+                small_caps(f"⏳ Flood Wait: Please wait {wait_sec}s before using another command."),
+            )
         raise StopPropagation
 
     _cmd_cooldowns[uid] = now
+    _cooldown_warned.pop(uid, None)
 
 # ==============================================
 # GLOBAL /cancel COMMAND
