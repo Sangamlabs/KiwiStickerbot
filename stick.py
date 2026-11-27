@@ -1187,6 +1187,10 @@ _THIS_BOT_COMMANDS = {
     "channels", "listch", "listchannel", "listchannels", "mychats", "getid", "fsubdebug",
 }
 
+# Commands that work in groups WITHOUT needing /start in DM first
+# /q = quote sticker, /r = quote-reply sticker, /kang = kang sticker
+_GROUP_FREE_CMDS = {"q", "quote", "r", "kang"}
+
 def _extract_bot_cmd(client, text: str):
     """Return lowercase command name if text is a command for THIS bot, else None."""
     if not text or not text.startswith("/"):
@@ -1219,7 +1223,12 @@ async def group_start_gate(client: Client, message: Message):
     except Exception:
         pass
 
-    if not _extract_bot_cmd(client, message.text):
+    cmd_low = _extract_bot_cmd(client, message.text)
+    if not cmd_low:
+        return
+
+    # /q, /r (quote), /kang — group me freely usable, DM-start gate skip
+    if cmd_low in _GROUP_FREE_CMDS:
         return
 
     if not message.from_user:
